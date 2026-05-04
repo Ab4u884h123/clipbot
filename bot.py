@@ -3,6 +3,7 @@ import time
 import json
 import subprocess
 import requests
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,12 +15,16 @@ SOURCES_FILE = "sources.txt"
 POSTED_FILE = "posted.json"
 DOWNLOAD_DIR = "downloads"
 
+MAX_VIDEO_AGE_DAYS = 2
+VIDEOS_TO_CHECK_PER_ACCOUNT = 10
+
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
 def load_posted():
     if not os.path.exists(POSTED_FILE):
         return set()
+
     with open(POSTED_FILE, "r", encoding="utf-8") as f:
         return set(json.load(f))
 
@@ -34,6 +39,21 @@ def load_sources():
         return [line.strip() for line in f if line.strip()]
 
 
+def run_ytdlp_json(video_url):
+    command = [
+        "python", "-m", "yt_dlp",
+        "--dump-json",
+        video_url
+    ]
+
+    result = subprocess.run(command, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        return None
+
+    return json.loads(result.stdout)
+
+
 def find_latest_videos(source_url):
     command = [
         "python", "-m", "yt_dlp",
@@ -45,36 +65,31 @@ def find_latest_videos(source_url):
     result = subprocess.run(command, capture_output=True, text=True)
 
     links = []
+
     for line in result.stdout.splitlines():
         if line.startswith("http"):
             links.append(line.strip())
 
-    return links[:5]
+    return links[:VIDEOS_TO_CHECK_PER_ACCOUNT]
 
 
-def get_video_info(video_url):
-    command = [
-        "python", "-m", "yt_dlp",
-        "--dump-json",
-        video_url
-    ]
+def is_recent_video(info):
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=MAX_VIDEO_AGE_DAYS)
 
-    result = subprocess.run(command, capture_output=True, text=True)
+    timestamp = info.get("timestamp")
 
-    if result.returncode != 0:
-        return {
-            "uploader": "unknown",
-            "title": "",
-            "webpage_url": video_url
-        }
+    if timestamp:
+        upload_time = datetime.fromtimestamp(timestamp, timezone.utc)
+        return upload_time >= cutoff
 
-    info = json.loads(result.stdout)
+    upload_date = info.get("upload_date")
 
-    return {
-        "uploader": info.get("uploader") or "unknown",
-        "title": info.get("title") or "",
-        "webpage_url": info.get("webpage_url") or video_url
-    }
+    if upload_date:
+        upload_time = datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
+        return upload_time >= cutoff
+
+    return False
 
 
 def download_video(video_url):
@@ -99,11 +114,26 @@ def download_video(video_url):
     return max(files, key=os.path.getctime)
 
 
-def post_to_telegram(video_path, video_url):
-    info = get_video_info(video_url)
+def make_caption(info, video_url):
+    uploader = info.get("uploader") or info.get("channel") or "unknown"
+    title = info.get("title") or "No caption found"
+    link = info.get("webpage_url") or video_url
 
-    caption = f"@{info['uploader']}\n{info['title']}\n{info['webpage_url']}"
+    if not uploader.startswith("@"):
+        uploader_display = f"@{uploader}"
+    else:
+        uploader_display = uploader
 
+    caption = (
+        f"Streamer: {uploader_display}\n\n"
+        f"TikTok Caption:\n{title}\n\n"
+        f"Source:\n{link}"
+    )
+
+    return caption[:1024]
+
+
+def post_to_telegram(video_path, caption):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
 
     with open(video_path, "rb") as video:
@@ -111,7 +141,7 @@ def post_to_telegram(video_path, video_url):
             url,
             data={
                 "chat_id": CHAT_ID,
-                "caption": caption[:1024],
+                "caption": caption,
                 "supports_streaming": True
             },
             files={"video": video}
@@ -132,7 +162,7 @@ while True:
     sources = load_sources()
 
     for source in sources:
-        print("Checking:", source)
+        print("Checking account:", source)
 
         try:
             videos = find_latest_videos(source)
@@ -141,13 +171,27 @@ while True:
                 if video_url in posted:
                     continue
 
-                print("New video found:", video_url)
+                print("Checking video:", video_url)
+
+                info = run_ytdlp_json(video_url)
+
+                if not info:
+                    print("Could not get video info, skipping.")
+                    continue
+
+                if not is_recent_video(info):
+                    print("Video is older than 2 days, skipping.")
+                    continue
+
+                print("Recent video found:", video_url)
 
                 video_path = download_video(video_url)
 
                 if video_path:
+                    caption = make_caption(info, video_url)
+
                     print("Posting to Telegram...")
-                    post_to_telegram(video_path, video_url)
+                    post_to_telegram(video_path, caption)
 
                     posted.add(video_url)
                     save_posted(posted)
