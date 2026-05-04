@@ -15,8 +15,9 @@ SOURCES_FILE = "sources.txt"
 POSTED_FILE = "posted.json"
 DOWNLOAD_DIR = "downloads"
 
-MAX_VIDEO_AGE_DAYS = 2
+MAX_VIDEO_AGE_DAYS = 1
 VIDEOS_TO_CHECK_PER_ACCOUNT = 10
+CHECK_EVERY_SECONDS = 60
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -25,8 +26,11 @@ def load_posted():
     if not os.path.exists(POSTED_FILE):
         return set()
 
-    with open(POSTED_FILE, "r", encoding="utf-8") as f:
-        return set(json.load(f))
+    try:
+        with open(POSTED_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except:
+        return set()
 
 
 def save_posted(posted):
@@ -49,9 +53,37 @@ def run_ytdlp_json(video_url):
     result = subprocess.run(command, capture_output=True, text=True)
 
     if result.returncode != 0:
+        print("Could not read video info:", result.stderr)
         return None
 
     return json.loads(result.stdout)
+
+
+def get_video_timestamp(info):
+    timestamp = info.get("timestamp")
+
+    if timestamp:
+        return int(timestamp)
+
+    upload_date = info.get("upload_date")
+
+    if upload_date:
+        upload_time = datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
+        return int(upload_time.timestamp())
+
+    return 0
+
+
+def is_recent_video(info):
+    video_timestamp = get_video_timestamp(info)
+
+    if video_timestamp == 0:
+        return False
+
+    upload_time = datetime.fromtimestamp(video_timestamp, timezone.utc)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_VIDEO_AGE_DAYS)
+
+    return upload_time >= cutoff
 
 
 def find_latest_videos(source_url):
@@ -70,26 +102,29 @@ def find_latest_videos(source_url):
         if line.startswith("http"):
             links.append(line.strip())
 
-    return links[:VIDEOS_TO_CHECK_PER_ACCOUNT]
+    videos = []
 
+    for video_url in links[:VIDEOS_TO_CHECK_PER_ACCOUNT]:
+        info = run_ytdlp_json(video_url)
 
-def is_recent_video(info):
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=MAX_VIDEO_AGE_DAYS)
+        if not info:
+            continue
 
-    timestamp = info.get("timestamp")
+        if not is_recent_video(info):
+            print("Skipping old video:", video_url)
+            continue
 
-    if timestamp:
-        upload_time = datetime.fromtimestamp(timestamp, timezone.utc)
-        return upload_time >= cutoff
+        timestamp = get_video_timestamp(info)
 
-    upload_date = info.get("upload_date")
+        videos.append({
+            "url": video_url,
+            "info": info,
+            "timestamp": timestamp
+        })
 
-    if upload_date:
-        upload_time = datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
-        return upload_time >= cutoff
+    videos.sort(key=lambda x: x["timestamp"], reverse=True)
 
-    return False
+    return videos
 
 
 def download_video(video_url):
@@ -120,13 +155,11 @@ def make_caption(info, video_url):
     link = info.get("webpage_url") or video_url
 
     if not uploader.startswith("@"):
-        uploader_display = f"@{uploader}"
-    else:
-        uploader_display = uploader
+        uploader = f"@{uploader}"
 
     caption = (
-        f"Streamer: {uploader_display}\n\n"
-        f"TikTok Caption:\n{title}\n\n"
+        f"Streamer: {uploader}\n\n"
+        f"Caption:\n{title}\n\n"
         f"Source:\n{link}"
     )
 
@@ -167,30 +200,21 @@ while True:
         try:
             videos = find_latest_videos(source)
 
-            for video_url in videos:
+            for video in videos:
+                video_url = video["url"]
+                info = video["info"]
+
                 if video_url in posted:
+                    print("Already posted:", video_url)
                     continue
 
-                print("Checking video:", video_url)
-
-                info = run_ytdlp_json(video_url)
-
-                if not info:
-                    print("Could not get video info, skipping.")
-                    continue
-
-                if not is_recent_video(info):
-                    print("Video is older than 2 days, skipping.")
-                    continue
-
-                print("Recent video found:", video_url)
+                print("Posting recent video:", video_url)
 
                 video_path = download_video(video_url)
 
                 if video_path:
                     caption = make_caption(info, video_url)
 
-                    print("Posting to Telegram...")
                     post_to_telegram(video_path, caption)
 
                     posted.add(video_url)
@@ -201,4 +225,4 @@ while True:
             print("Error:", e)
 
     print("Waiting 1 minute...")
-    time.sleep(60)
+    time.sleep(CHECK_EVERY_SECONDS)
