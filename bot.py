@@ -10,6 +10,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 
 SOURCES_FILE = "sources.txt"
 POSTED_FILE = "posted.json"
@@ -20,6 +21,25 @@ VIDEOS_TO_CHECK_PER_ACCOUNT = 10
 CHECK_EVERY_SECONDS = 60
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+
+def send_notification(message):
+    if not OWNER_CHAT_ID:
+        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    try:
+        requests.post(
+            url,
+            json={
+                "chat_id": OWNER_CHAT_ID,
+                "text": message
+            },
+            timeout=15
+        )
+    except Exception as e:
+        print("Notification error:", e)
 
 
 def load_posted():
@@ -177,10 +197,12 @@ def post_to_telegram(video_path, caption):
                 "caption": caption,
                 "supports_streaming": True
             },
-            files={"video": video}
+            files={"video": video},
+            timeout=120
         )
 
     print(response.text)
+    return response.json()
 
 
 def clean_downloads():
@@ -189,6 +211,7 @@ def clean_downloads():
 
 
 print("Bot started...")
+send_notification("✅ Clip bot started and is running.")
 
 while True:
     posted = load_posted()
@@ -214,15 +237,29 @@ while True:
 
                 if video_path:
                     caption = make_caption(info, video_url)
+                    result = post_to_telegram(video_path, caption)
 
-                    post_to_telegram(video_path, caption)
+                    if result.get("ok"):
+                        posted.add(video_url)
+                        save_posted(posted)
+                        clean_downloads()
 
-                    posted.add(video_url)
-                    save_posted(posted)
-                    clean_downloads()
+                        uploader = info.get("uploader") or info.get("channel") or "unknown"
+                        send_notification(
+                            f"✅ New video posted\n\n"
+                            f"Streamer: @{uploader}\n"
+                            f"Link: {video_url}"
+                        )
+                    else:
+                        send_notification(
+                            f"⚠️ Failed to post video\n\n"
+                            f"Link: {video_url}\n"
+                            f"Telegram response: {result}"
+                        )
 
         except Exception as e:
             print("Error:", e)
+            send_notification(f"⚠️ Bot error:\n\n{e}")
 
     print("Waiting 1 minute...")
     time.sleep(CHECK_EVERY_SECONDS)
