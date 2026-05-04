@@ -36,12 +36,9 @@ def load_sources():
 
 def find_latest_videos(source_url):
     command = [
-        "python",
-        "-m",
-        "yt_dlp",
+        "python", "-m", "yt_dlp",
         "--flat-playlist",
-        "--print",
-        "%(webpage_url)s",
+        "--print", "%(webpage_url)s",
         source_url
     ]
 
@@ -55,15 +52,36 @@ def find_latest_videos(source_url):
     return links[:5]
 
 
+def get_video_info(video_url):
+    command = [
+        "python", "-m", "yt_dlp",
+        "--dump-json",
+        video_url
+    ]
+
+    result = subprocess.run(command, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        return {
+            "uploader": "unknown",
+            "title": "",
+            "webpage_url": video_url
+        }
+
+    info = json.loads(result.stdout)
+
+    return {
+        "uploader": info.get("uploader") or "unknown",
+        "title": info.get("title") or "",
+        "webpage_url": info.get("webpage_url") or video_url
+    }
+
+
 def download_video(video_url):
     command = [
-        "python",
-        "-m",
-        "yt_dlp",
-        "-f",
-        "mp4/best",
-        "-o",
-        f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
+        "python", "-m", "yt_dlp",
+        "-f", "mp4/best",
+        "-o", f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
         video_url
     ]
 
@@ -82,16 +100,18 @@ def download_video(video_url):
 
 
 def post_to_telegram(video_path, video_url):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
+    info = get_video_info(video_url)
 
-    caption = f"New clip:\n{video_url}"
+    caption = f"@{info['uploader']}\n{info['title']}\n{info['webpage_url']}"
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
 
     with open(video_path, "rb") as video:
         response = requests.post(
             url,
             data={
                 "chat_id": CHAT_ID,
-                "caption": caption,
+                "caption": caption[:1024],
                 "supports_streaming": True
             },
             files={"video": video}
@@ -128,6 +148,7 @@ while True:
                 if video_path:
                     print("Posting to Telegram...")
                     post_to_telegram(video_path, video_url)
+
                     posted.add(video_url)
                     save_posted(posted)
                     clean_downloads()
@@ -135,5 +156,5 @@ while True:
         except Exception as e:
             print("Error:", e)
 
-    print("Waiting 5 minutes...")
+    print("Waiting 1 minute...")
     time.sleep(60)
